@@ -31,7 +31,7 @@
 #define CHIPSET     WS2812B
 #define NUM_LEDS    30
 
-#define UPDATE_RATE 5000
+#define UPDATE_RATE 1000
 
 // LCG RNG parameters
 // (A = LCF of primes of NUM_LEDS + 1,
@@ -57,29 +57,47 @@ enum WEATHER_TYPE {unknown, clear_day, clear_night,
                   };
 WEATHER_TYPE weather = unknown; // set to a default
 
+// used for palettes - give each LED a chunk of the palette to walk
+int palette_stride = 255 / NUM_LEDS;
+
 void setup() {
   FastLED.addLeds<CHIPSET, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   Serial.begin(9600);
   rtc.begin();
-  WiFi.mode(WIFI_STA);
   Serial.setDebugOutput(true);
-  // attempt to connect to Wifi network:
-  while ( WiFi.status() != WL_CONNECTED) {
-    Serial.print("Attempting to connect to WPA SSID: ");
-    Serial.println(ssid);
-    // Connect to WPA/WPA2 network:
-    WiFi.begin(ssid, pass);
-
-    // wait 10 seconds for connection:
-    delay(10000);
-  }
-  Serial.println("Connected!");
-  WiFi.printDiag(Serial);
-
+  WiFi.setAutoConnect(false);
+  startWifi();
   updateTime();
   updateLocation();
+  stopWifi();
 }
 
+void startWifi() {
+  Serial.print("Attempting to connect to WPA SSID: ");
+  Serial.println(ssid);
+  // Connect to WPA/WPA2 network:
+  WiFi.begin(ssid, pass);
+  WiFi.mode(WIFI_STA);
+  // attempt to connect to Wifi network:
+  unsigned long watchdog_start = millis();
+  unsigned long watchdog = 0;
+  // try to connect for 10 seconds
+  while ( watchdog < 10000) {
+    delay(500);
+    Serial.print(".");
+    watchdog = abs(millis() - watchdog_start);
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      Serial.println("Connected!");
+      break;
+    }
+  }
+  WiFi.printDiag(Serial);
+}
+void stopWifi() {
+  WiFi.disconnect(true);
+  delay(500);
+}
 
 const char* time_service = "time.nist.gov";
 const int time_port = 13;
@@ -114,6 +132,10 @@ void updateTime() {
                           hour.toInt(), minute.toInt(), second.toInt()) - tz_offset);
       Serial.println("Set time!");
     }
+    client.stop();
+  }
+  else {
+    Serial.println("couldn't connect to time service");
   }
 }
 
@@ -172,6 +194,10 @@ void updateLocation() {
       longitude = root["lon"];
       Serial.println("set location to: " + String(latitude) + "," + String(longitude));
     }
+    client.stop();
+  }
+  else {
+    Serial.println("couldn't connect to location service");
   }
 }
 
@@ -250,6 +276,10 @@ void updateWeather() {
       }
       Serial.println( "set weather to: " + String(weather));
     }
+    client.stop();
+  }
+  else {
+    Serial.println("couldn't connect to weather service");
   }
 }
 
@@ -262,15 +292,45 @@ void standard_color() {
   }
 }
 
+
+
 void apply_colors(CRGBPalette16 palette) {
+
+  // this is "position on the strip" so that it's not sequential
   int dot = 0;
-  for (int ix = 0; ix < 256; ix++)
+
+  // are we walking up or down the palette? (want to go back and forth)
+  bool walkingUp = true;
+  int paletteix = 0;
+  int ledix = 0;
+
+  //(for each palette section, update all LEDs)
+  while (paletteix >= 0)
   {
-    leds[dot] = ColorFromPalette(palette, ix);
-    // compute next dot via LCG
+    // compute and set color
+    int palette_offset = (ledix*palette_stride) + paletteix;
+    leds[dot] = ColorFromPalette(palette, palette_offset);
+    // compute next position on the strip via LCG
     dot = (LCG_A * dot + LCG_C) % NUM_LEDS;
     FastLED.show();
     delay(UPDATE_RATE / NUM_LEDS);
+
+    // increment ledix and loop around
+    ledix++;
+    if (ledix >= NUM_LEDS)
+    {
+      // restart led counter
+      ledix = 0;
+      // increment or decrement paletteix
+      if (!walkingUp)
+      {
+        paletteix--;
+      } else if (paletteix >= palette_stride) {
+        walkingUp = false; // switch directions
+      } else {
+        paletteix++;
+      }
+    }
   }
 }
 
@@ -299,14 +359,16 @@ void flashing_red() {
 }
 
 long next_update = 0;
-const long update_interval = 60 * 60; // seconds
+const long update_interval = 15 * 60; // seconds
 void loop() {
   // do we need to check the weather?
   long now = rtc.now().secondstime();
   if (now > next_update)
   {
     Serial.println("need to check for weather update");
+    startWifi();
     updateWeather();
+    stopWifi();
     next_update = now + update_interval;
   }
   displayTime();
